@@ -1,0 +1,78 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Once a week, check the parser still copes with what upstream has become.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ["1.22", "1.23"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+      - name: build
+        run: CGO_ENABLED=0 go build -trimpath ./...
+
+  staticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - run: go run honnef.co/go/tools/cmd/staticcheck@2024.1.1 ./...
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: fuzz the opam file scanner
+        run: go test ./internal/opamfile/ -run XXX -fuzz FuzzParse -fuzztime 60s
+      - name: fuzz archive naming
+        run: go test ./internal/mirror/ -run XXX -fuzz FuzzArchiveName -fuzztime 30s
+
+  # A parser for a format this baroque is only as good as the corpus it has
+  # seen, so the real repository is part of the test suite. It is a large
+  # clone, so this runs on a schedule and on demand rather than per commit.
+  corpus:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: clone opam-repository
+        run: git clone --depth 1 https://github.com/ocaml/opam-repository /tmp/opam-repository
+      - name: parse and rebuild every package
+        run: OPAMELA_CORPUS=/tmp/opam-repository go test ./... -run Corpus -v -timeout 20m
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t opamela:ci .
