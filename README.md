@@ -38,25 +38,41 @@ thousand URLs pointing elsewhere, and downloads its packages from exactly the
 same hosts as before. The cache is not on the path. It never sees the traffic.
 
 A cache can only cache what goes through it. An ecosystem whose index points at
-third-party URLs cannot be cached — only mirrored. So opamela rewrites the
-index:
+third-party URLs cannot be cached — only mirrored. So opamela rewrites the index,
+and you run it **inside your CI network, next to the runners**:
 
+```mermaid
+flowchart LR
+    repo["ocaml/opam-repository<br/>(the index, git)"]
+    upstream["≈ 3000 upstream hosts<br/>GitHub · GitLab · university and personal servers"]
+
+    subgraph net["CI network — private, no metered egress"]
+        direction TB
+        runners["CI runners<br/>every job of every build"]
+        opamela["opamELA<br/>rewritten index + archive cache"]
+        runners -->|"all package traffic stays on the LAN"| opamela
+    end
+
+    repo -.->|"clone once, refresh on a timer"| opamela
+    opamela ==>|"cache miss: each archive crosses once,<br/>then served from disk"| upstream
 ```
-                    ┌──────────────────────────────────────────┐
-   opam-repository  │  opamela                                 │
-   ────────────────►│                                          │
-   (git clone)      │  packages/foo/foo.1.0/opam               │
-                    │    url.src: https://you/download/foo/... │◄──── opam
-                    │                                          │      (repository
-                    │  index.tar.gz                            │       set-url)
-                    │                                          │
-                    │  /download/foo/1.0/foo-1.0.tar.gz        │
-                    └────────────┬─────────────────────────────┘
-                                 │ first request only,
-                                 │ then served from disk
-                                 ▼
-                        the archive's real home
-```
+
+Two things follow from that placement.
+
+First, the index is rewritten, so a build resolves every dependency through
+opamELA instead of chasing several thousand third-party URLs. From opam's side
+it is just a repository; it never learns it is talking to a mirror.
+
+Second — and this is where it pays for itself — **each archive crosses the public
+internet exactly once.** The first build that needs it pulls it in; every build
+afterwards reads it from a host on the same network, at LAN speed.
+
+Without that, every runner on every build re-downloads the same archives from the
+public internet. On a large OCaml monorepo — [Tezos](https://gitlab.com/tezos/tezos),
+say, with its thousands of CI jobs a day — that repeated egress is not a rounding
+error: it is a metered cloud cost that grows with your CI and buys you nothing,
+because it is the same bytes fetched over and over. opamELA turns that recurring
+bill into a one-time fetch per archive.
 
 ## Quick start
 
