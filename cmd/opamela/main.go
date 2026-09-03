@@ -92,7 +92,7 @@ Exit codes:
   1  a runtime error (build failed, cannot listen, upstream unreachable)
   2  a usage error (missing -base-url, unknown flag or argument)
 
-Documentation: https://github.com/jeremiegoldberg/opamela
+Documentation: https://github.com/jeremiegoldberg/OPAMela
 `)
 	}
 	flag.Parse()
