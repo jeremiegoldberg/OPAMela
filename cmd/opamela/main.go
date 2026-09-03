@@ -57,12 +57,57 @@ func main() {
 	flag.Var(&overlays, "overlay", "additional repository whose packages take precedence; repeatable")
 
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(),
-			"opamela %s - an opam-repository mirror\n\nUsage:\n  opamela -base-url https://opam.internal [flags]\n\nFlags:\n",
-			version)
+		out := flag.CommandLine.Output()
+		fmt.Fprintf(out, `opamela %s - a mirror of opam-repository.
+
+It rewrites the repository index so a whole CI fleet fetches opam packages from
+one host on its own network, instead of re-downloading them from the public
+internet on every build. It works with unmodified opam.
+
+Usage:
+  opamela -base-url <url> [flags]
+  opamela help
+  opamela -version
+
+Examples:
+  # Serve a mirror on :8080, cloning ocaml/opam-repository under -state.
+  opamela -base-url https://opam.internal
+
+  # Also merge the dune-universe overlay (needed for opam-monorepo).
+  opamela -base-url https://opam.internal \
+      -overlay https://github.com/dune-universe/opam-overlays
+
+  # Build the mirror once and exit, without serving.
+  opamela -base-url https://opam.internal -build-only
+
+Point opam at it once it is up:
+  opam repository set-url default https://opam.internal && opam update
+
+Flags:
+`, version)
 		flag.PrintDefaults()
+		fmt.Fprint(out, `
+Exit codes:
+  0  success
+  1  a runtime error (build failed, cannot listen, upstream unreachable)
+  2  a usage error (missing -base-url, unknown flag or argument)
+
+Documentation: https://github.com/jeremiegoldberg/opamela
+`)
 	}
 	flag.Parse()
+
+	// help is accepted as a bare argument, and any other stray argument is a
+	// usage error rather than something silently ignored.
+	switch args := flag.Args(); {
+	case len(args) > 0 && args[0] == "help":
+		flag.Usage()
+		return
+	case len(args) > 0:
+		fmt.Fprintf(os.Stderr, "opamela: unexpected argument %q\n\n", args[0])
+		flag.Usage()
+		os.Exit(2)
+	}
 
 	if *showVersion {
 		fmt.Println("opamela", version)
@@ -73,7 +118,8 @@ func main() {
 	slog.SetDefault(log)
 
 	if *baseURL == "" {
-		log.Error("-base-url is required: rewritten packages have to name a host builds can reach")
+		fmt.Fprint(os.Stderr, "opamela: -base-url is required, since rewritten packages have to name a host your builds can reach.\n\n")
+		flag.Usage()
 		os.Exit(2)
 	}
 	if err := run(log, config{

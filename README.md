@@ -113,6 +113,92 @@ docker run -p 8080:8080 -v opamela-state:/var/lib/opamela \
     opamela -base-url http://localhost:8080
 ```
 
+## Tutorial: from nothing to a CI-wide cache
+
+A step-by-step run-through, with what happens under the hood at each step.
+
+### 1. Put it where your builds are
+
+Run one instance **inside your CI network**, on a host the runners reach over
+the LAN. That placement is the whole point: every job of every build will fetch
+its opam packages from this host instead of from the public internet, so each
+archive crosses the internet once rather than on every build.
+
+### 2. Start it
+
+```sh
+./opamela -base-url https://opam.internal -state /var/lib/opamela
+```
+
+`-base-url` is the address your builds will use to reach this server; it is
+written verbatim into every package file, so it has to be reachable from the
+runners (not `localhost`). `-state` is a directory opamela owns: it holds the
+git checkout, the generated repository and the archive cache. Everything in it
+is reproducible, so it never needs backing up.
+
+### 3. Wait for the first build
+
+On startup opamela clones `ocaml/opam-repository`, then rewrites every package
+file to point its `url.src` — and every `extra-source` patch — at itself, and
+writes the `index.tar.gz` opam expects. It answers `503` on `/healthz` until
+that is done, which takes a few seconds, then reports the revision it serves:
+
+```sh
+$ curl -s https://opam.internal/healthz
+ok rev=a1b2c3d4e5f6 built=2026-09-02T09:14:22Z
+```
+
+Nothing has been downloaded from upstream package hosts yet. Only the index was
+cloned; the archives themselves arrive on demand.
+
+### 4. Point opam at it
+
+```sh
+opam repository set-url default https://opam.internal
+opam update
+```
+
+opam now pulls the index from the mirror. From here on, when it reads a package
+it finds a `url.src` that points back at the mirror, not at GitHub or a personal
+server.
+
+### 5. Watch the cache fill
+
+The first time any build needs an archive, opamela fetches it once from its real
+upstream, checks it against the checksum the package declares, stores it, and
+serves it:
+
+```
+level=INFO msg="cached archive" key=dune-3.0.3.tbz bytes=1387588 src=https://github.com/ocaml/dune/releases/...
+```
+
+Every build after that, on any runner, gets that archive straight from disk at
+LAN speed. No second request leaves your network.
+
+### 6. Wire it into CI, and cover opam-monorepo
+
+Bake the `opam repository set-url` into your CI base image or switch setup, so
+every job starts already pointed at the mirror. If you use
+[opam-monorepo](https://github.com/tarides/opam-monorepo), add the dune overlay
+so its dune-built variants win over the official packages:
+
+```sh
+opamela -base-url https://opam.internal \
+    -overlay https://github.com/dune-universe/opam-overlays
+```
+
+### 7. Keep it fresh, or roll back
+
+opamela re-clones upstream on a timer (`-refresh`, hourly by default) and swaps
+in the new repository only once it is fully built, so a refresh that cannot
+reach GitHub just keeps serving the tree it already had. To stop using the
+mirror entirely, point opam back at the official repository; nothing in your
+switch has to be rebuilt.
+
+```sh
+opam repository set-url default https://opam.ocaml.org
+```
+
 ## Flags
 
 | Flag | Default | Meaning |
@@ -168,8 +254,9 @@ cannot do at all with a caching proxy.
 
 - **It does not mirror git sources.** Around nineteen packages in
   opam-repository point at `git+https` or `ftp` URLs, which cannot be served as
-  archives. Those files are passed through untouched and continue to resolve
-  upstream.
+  archives. Those `url.src` values (and the rare `extra-source` in the same
+  form) are passed through untouched and continue to resolve upstream. Ordinary
+  `http`/`https` archives, including `extra-source` patches, are mirrored.
 - **It does not pre-download anything.** Archives arrive on first request. A
   cold mirror is not faster than upstream; the second build is.
 - **It does not authenticate anyone.** Put it behind whatever your network
