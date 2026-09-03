@@ -1,7 +1,6 @@
 package opamfile
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,24 +39,20 @@ func TestCorpus(t *testing.T) {
 		}
 		files++
 
-		u, err := Parse(data)
-		switch {
-		case errors.Is(err, ErrNoURL):
+		u, _ := Parse(data)
+		if u.URL == nil {
 			sourceless++
-			return nil
-		case err != nil:
-			failures = append(failures, path+": "+err.Error())
 			return nil
 		}
 
 		withURL++
 
 		// A parsed src must be a plausible, single-line URL.
-		if strings.ContainsAny(u.Src, "\n\r\t\"") {
+		if strings.ContainsAny(u.URL.Src, "\n\r\t\"") {
 			failures = append(failures, path+": src carries control characters")
 		}
-		if !strings.Contains(u.Src, "://") {
-			failures = append(failures, path+": src is not a URL: "+u.Src)
+		if !strings.Contains(u.URL.Src, "://") {
+			failures = append(failures, path+": src is not a URL: "+u.URL.Src)
 		}
 
 		// Round-trip: rewriting and re-parsing must give back what we wrote,
@@ -68,15 +63,15 @@ func TestCorpus(t *testing.T) {
 			failures = append(failures, path+": rewrite: "+err.Error())
 			return nil
 		}
-		again, err := Parse(out)
-		if err != nil {
-			failures = append(failures, path+": re-parse after rewrite: "+err.Error())
+		again, _ := Parse(out)
+		if again.URL == nil {
+			failures = append(failures, path+": rewrite dropped the url section")
 			return nil
 		}
-		if again.Src != replacement {
-			failures = append(failures, path+": rewrite produced src "+again.Src)
+		if again.URL.Src != replacement {
+			failures = append(failures, path+": rewrite produced src "+again.URL.Src)
 		}
-		if len(again.Checksums) != len(u.Checksums) {
+		if len(again.URL.Checksums) != len(u.URL.Checksums) {
 			failures = append(failures, path+": rewrite changed the checksum count")
 		}
 		return nil

@@ -1,7 +1,6 @@
 package opamfile
 
 import (
-	"errors"
 	"strings"
 	"testing"
 )
@@ -45,13 +44,13 @@ func TestParseWrappedSrc(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 	want := "https://github.com/dannywillems/ocaml-cordova-plugin-fcm/archive/v1.0.zip"
-	if u.Src != want {
-		t.Errorf("Src = %q, want %q", u.Src, want)
+	if u.URL.Src != want {
+		t.Errorf("Src = %q, want %q", u.URL.Src, want)
 	}
-	if len(u.Checksums) != 1 || u.Checksums[0].Kind != "md5" {
-		t.Fatalf("Checksums = %v, want one md5", u.Checksums)
+	if len(u.URL.Checksums) != 1 || u.URL.Checksums[0].Kind != "md5" {
+		t.Fatalf("Checksums = %v, want one md5", u.URL.Checksums)
 	}
-	if got := u.Checksums[0].Hex; got != "f43612d7e05496ff5863c40b5e8638df" {
+	if got := u.URL.Checksums[0].Hex; got != "f43612d7e05496ff5863c40b5e8638df" {
 		t.Errorf("md5 = %q", got)
 	}
 }
@@ -61,11 +60,11 @@ func TestParseChecksumList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(u.Checksums) != 2 {
-		t.Fatalf("got %d checksums, want 2: %v", len(u.Checksums), u.Checksums)
+	if len(u.URL.Checksums) != 2 {
+		t.Fatalf("got %d checksums, want 2: %v", len(u.URL.Checksums), u.URL.Checksums)
 	}
-	if u.Checksums[0].Kind != "md5" || u.Checksums[1].Kind != "sha512" {
-		t.Errorf("kinds = %q, %q", u.Checksums[0].Kind, u.Checksums[1].Kind)
+	if u.URL.Checksums[0].Kind != "md5" || u.URL.Checksums[1].Kind != "sha512" {
+		t.Errorf("kinds = %q, %q", u.URL.Checksums[0].Kind, u.URL.Checksums[1].Kind)
 	}
 }
 
@@ -85,8 +84,8 @@ url {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if u.Src != "https://example.org/pkg-1.0.tar.gz" {
-		t.Errorf("Src = %q", u.Src)
+	if u.URL.Src != "https://example.org/pkg-1.0.tar.gz" {
+		t.Errorf("Src = %q", u.URL.Src)
 	}
 }
 
@@ -107,8 +106,8 @@ url {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if u.Src != "https://example.org/real-1.0.tar.gz" {
-		t.Errorf("Src = %q, want the url section, not extra-source", u.Src)
+	if u.URL.Src != "https://example.org/real-1.0.tar.gz" {
+		t.Errorf("Src = %q, want the url section, not extra-source", u.URL.Src)
 	}
 }
 
@@ -117,8 +116,9 @@ func TestParseNoURL(t *testing.T) {
 synopsis: "Virtual package relying on a system installation"
 depends: ["conf-pkg-config" {build}]
 `
-	if _, err := Parse([]byte(in)); !errors.Is(err, ErrNoURL) {
-		t.Errorf("err = %v, want ErrNoURL", err)
+	f, _ := Parse([]byte(in))
+	if f.URL != nil {
+		t.Errorf("URL = %+v, want nil for a sourceless package", f.URL)
 	}
 }
 
@@ -132,14 +132,14 @@ func TestRewriteSrcPreservesEverythingElse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-parse: %v", err)
 	}
-	if u.Src != "https://mirror.internal/download/posix-base/2.0.0/v2.0.0.tar.gz" {
-		t.Errorf("Src = %q", u.Src)
+	if u.URL.Src != "https://mirror.internal/download/posix-base/2.0.0/v2.0.0.tar.gz" {
+		t.Errorf("Src = %q", u.URL.Src)
 	}
 
 	// The checksums are the reason a rewritten repository is still safe to
 	// build from. They must survive the rewrite byte for byte.
-	if len(u.Checksums) != 2 {
-		t.Fatalf("checksums lost: %v", u.Checksums)
+	if len(u.URL.Checksums) != 2 {
+		t.Fatalf("checksums lost: %v", u.URL.Checksums)
 	}
 	for _, keep := range []string{
 		`synopsis: "Unix.LargeFile bindings"`,
@@ -164,8 +164,8 @@ func TestRewriteSrcOnWrappedValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-parse: %v", err)
 	}
-	if u.Src != "https://mirror.internal/download/cordova-plugin-fcm/1.0/v1.0.zip" {
-		t.Errorf("Src = %q", u.Src)
+	if u.URL.Src != "https://mirror.internal/download/cordova-plugin-fcm/1.0/v1.0.zip" {
+		t.Errorf("Src = %q", u.URL.Src)
 	}
 }
 
@@ -220,15 +220,16 @@ func FuzzParse(f *testing.F) {
 	f.Add(`extra-source "p" { src: "a" } url { src: "b" }`)
 
 	f.Fuzz(func(t *testing.T, in string) {
-		u, err := Parse([]byte(in))
-		if err != nil {
-			return
+		file, _ := Parse([]byte(in))
+		if file.URL == nil {
+			return // sourceless: nothing to rewrite
 		}
+		u := file.URL
 		if u.Src == "" {
-			t.Fatal("Parse returned a nil error and an empty src")
+			t.Fatal("Parse returned a url source with an empty src")
 		}
-		if u.srcStart < 0 || u.srcEnd > len(in) || u.srcStart >= u.srcEnd {
-			t.Fatalf("src range [%d,%d) is not inside a %d byte file", u.srcStart, u.srcEnd, len(in))
+		if u.start < 0 || u.end > len(in) || u.start >= u.end {
+			t.Fatalf("src range [%d,%d) is not inside a %d byte file", u.start, u.end, len(in))
 		}
 
 		// Rewriting must either refuse or produce a file that parses back to
@@ -236,14 +237,89 @@ func FuzzParse(f *testing.F) {
 		const replacement = "https://mirror.invalid/download/p/1.0/a.tar.gz"
 		out, err := RewriteSrc([]byte(in), replacement)
 		if err != nil {
-			t.Fatalf("Parse succeeded but RewriteSrc failed: %v", err)
+			t.Fatalf("Parse found a url but RewriteSrc failed: %v", err)
 		}
-		again, err := Parse(out)
-		if err != nil {
-			t.Fatalf("rewritten file no longer parses: %v", err)
-		}
-		if again.Src != replacement {
-			t.Fatalf("round trip gave src %q, want %q", again.Src, replacement)
+		again, _ := Parse(out)
+		if again.URL == nil || again.URL.Src != replacement {
+			t.Fatalf("round trip did not give back src %q", replacement)
 		}
 	})
+}
+
+const withExtraSources = `opam-version: "2.0"
+url {
+  src: "https://example.org/pkg-1.0.tar.gz"
+  checksum: "sha256=aaaa"
+}
+extra-source "fix.patch" {
+  src: "https://gist.example/raw/fix.patch"
+  checksum: "md5=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}
+extra-source "second.patch" {
+  src: "https://example.org/second.patch"
+  checksum: "sha512=cccc"
+}
+`
+
+func TestParseExtraSources(t *testing.T) {
+	f, _ := Parse([]byte(withExtraSources))
+	if f.URL == nil || f.URL.Src != "https://example.org/pkg-1.0.tar.gz" {
+		t.Fatalf("url = %+v", f.URL)
+	}
+	if len(f.Extra) != 2 {
+		t.Fatalf("got %d extra-sources, want 2", len(f.Extra))
+	}
+	if f.Extra[0].Name != "fix.patch" || f.Extra[0].Src != "https://gist.example/raw/fix.patch" {
+		t.Errorf("extra[0] = %+v", f.Extra[0])
+	}
+	if !f.Extra[0].IsExtra() || f.URL.IsExtra() {
+		t.Error("IsExtra is wrong")
+	}
+	if len(f.Sources()) != 3 {
+		t.Errorf("Sources() = %d, want 3 (url + 2 extra)", len(f.Sources()))
+	}
+}
+
+// The whole point of parsing extra-sources: opam fetches those patches at build
+// time, so a mirror has to rewrite them too or they bypass it entirely.
+func TestRewriteSourcesRewritesUrlAndExtras(t *testing.T) {
+	f, _ := Parse([]byte(withExtraSources))
+	out, err := RewriteSources([]byte(withExtraSources), f, func(s Source) string {
+		if s.IsExtra() {
+			return "https://mirror.internal/x/" + s.Name
+		}
+		return "https://mirror.internal/x/main.tar.gz"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g, _ := Parse(out)
+	if g.URL.Src != "https://mirror.internal/x/main.tar.gz" {
+		t.Errorf("url src = %q", g.URL.Src)
+	}
+	if len(g.Extra) != 2 ||
+		g.Extra[0].Src != "https://mirror.internal/x/fix.patch" ||
+		g.Extra[1].Src != "https://mirror.internal/x/second.patch" {
+		t.Fatalf("extras not rewritten: %+v", g.Extra)
+	}
+	// Checksums must survive the rewrite, url and extra alike.
+	if len(g.URL.Checksums) != 1 || g.Extra[0].Checksums[0].Kind != "md5" {
+		t.Errorf("checksums changed: %+v / %+v", g.URL.Checksums, g.Extra[0].Checksums)
+	}
+
+	// A source whose replacement is empty is left exactly as it was.
+	out2, _ := RewriteSources([]byte(withExtraSources), f, func(s Source) string {
+		if s.IsExtra() {
+			return ""
+		}
+		return "https://mirror.internal/only-main.tar.gz"
+	})
+	h, _ := Parse(out2)
+	if h.Extra[0].Src != "https://gist.example/raw/fix.patch" {
+		t.Errorf("extra changed despite empty replacement: %q", h.Extra[0].Src)
+	}
+	if h.URL.Src != "https://mirror.internal/only-main.tar.gz" {
+		t.Errorf("url not rewritten: %q", h.URL.Src)
+	}
 }

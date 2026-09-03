@@ -128,21 +128,30 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	u, err := opamfile.Parse(data)
-	if err != nil || !mirror.Mirrorable(u.Src) {
-		http.NotFound(w, r)
-		return
-	}
+	f, _ := opamfile.Parse(data) // Parse never returns an error
 
-	// The archive name is derived, not trusted: accepting an arbitrary name
-	// here would let one upstream source be cached under many keys.
-	if want := mirror.ArchiveName(u.Src, pkg.Name, pkg.Version); archive != want {
+	// Resolve the requested archive back to one of the package's sources: its
+	// url section, or one of its extra-sources. The archive name is derived,
+	// not trusted, so we recompute it for each source and match: accepting an
+	// arbitrary name would let one upstream source be cached under many keys.
+	var src *opamfile.Source
+	for _, cand := range f.Sources() {
+		if !mirror.Mirrorable(cand.Src) {
+			continue
+		}
+		if mirror.ArchiveNameFor(cand, pkg.Name, pkg.Version) == archive {
+			c := cand
+			src = &c
+			break
+		}
+	}
+	if src == nil {
 		http.NotFound(w, r)
 		return
 	}
 
 	key := pkg.Name + "/" + pkg.Version + "/" + archive
-	local, err := s.cache.Get(r.Context(), key, u.Src, u.Checksums)
+	local, err := s.cache.Get(r.Context(), key, src.Src, src.Checksums)
 	switch {
 	case errors.Is(err, fetch.ErrChecksumMismatch):
 		s.log.Error("refusing to serve archive", "key", key, "err", err)
@@ -157,20 +166,20 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(local)
+	af, err := os.Open(local)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
-	info, err := f.Stat()
+	defer af.Close()
+	info, err := af.Stat()
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeContent(w, r, archive, info.ModTime(), f)
+	http.ServeContent(w, r, archive, info.ModTime(), af)
 }
 
 // cleanRequestPath reduces a request path to a slash separated relative path with no

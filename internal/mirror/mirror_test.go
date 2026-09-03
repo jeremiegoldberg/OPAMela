@@ -73,13 +73,13 @@ func TestBuildWritesToVersionedDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := opamfile.Parse(data)
-	if err != nil {
-		t.Fatal(err)
+	u, _ := opamfile.Parse(data)
+	if u.URL == nil {
+		t.Fatal("rewritten file has no url section")
 	}
 	want := "https://mirror.internal/download/foo/1.0/foo-1.0.tar.gz"
-	if u.Src != want {
-		t.Errorf("src = %q, want %q", u.Src, want)
+	if u.URL.Src != want {
+		t.Errorf("src = %q, want %q", u.URL.Src, want)
 	}
 	if stats.Rewritten != 1 {
 		t.Errorf("Rewritten = %d, want 1", stats.Rewritten)
@@ -331,7 +331,7 @@ func TestBuildCorpus(t *testing.T) {
 		t.Errorf("no index generated: %v", err)
 	}
 
-	var checked, pointingAtMirror int
+	var checked, pointingAtMirror, extras, extrasRewritten int
 	err = filepath.WalkDir(packages, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || d.Name() != "opam" {
 			return err
@@ -340,15 +340,28 @@ func TestBuildCorpus(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		u, err := opamfile.Parse(data)
-		if err != nil {
+		u, _ := opamfile.Parse(data)
+		if u.URL == nil {
 			return nil // sourceless
 		}
 		checked++
-		if strings.HasPrefix(u.Src, "https://opam.internal/download/") {
+		if strings.HasPrefix(u.URL.Src, "https://opam.internal/download/") {
 			pointingAtMirror++
-			if strings.ContainsAny(u.Src, "\n\r\t\"") {
+			if strings.ContainsAny(u.URL.Src, "\n\r\t\"") {
 				t.Fatalf("%s: rewritten src carries control characters", p)
+			}
+		}
+		// Every extra-source that opam would fetch over http(s) must now come
+		// through the mirror too, otherwise a build still reaches the internet
+		// for its patches.
+		for _, e := range u.Extra {
+			extras++
+			if strings.HasPrefix(e.Src, "http://") || strings.HasPrefix(e.Src, "https://") {
+				if !strings.HasPrefix(e.Src, "https://opam.internal/download/") {
+					t.Errorf("%s: extra-source not rewritten: %s", p, e.Src)
+				} else {
+					extrasRewritten++
+				}
 			}
 		}
 		return nil
@@ -357,7 +370,51 @@ func TestBuildCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("%d packages with a source, %d now pointing at the mirror", checked, pointingAtMirror)
+	t.Logf("%d extra-sources, %d rewritten to the mirror", extras, extrasRewritten)
 	if pointingAtMirror != stats.Rewritten {
 		t.Errorf("%d files point at the mirror but Build reported %d rewritten", pointingAtMirror, stats.Rewritten)
+	}
+}
+
+// A package's extra-sources (patches opam fetches at build time) must be
+// rewritten to the mirror too, or a build reaches the public internet for them.
+func TestBuildRewritesExtraSources(t *testing.T) {
+	up := t.TempDir()
+	content := `opam-version: "2.0"
+synopsis: "test package with a patch"
+url {
+  src: "https://upstream.example/pkg-1.0.tar.gz"
+  checksum: "sha256=0000000000000000000000000000000000000000000000000000000000000000"
+}
+extra-source "fix.patch" {
+  src: "https://gist.example/raw/fix.patch"
+  checksum: "md5=00000000000000000000000000000000"
+}
+extra-source "over-git.patch" {
+  src: "git+https://example.org/thing.git"
+}
+`
+	writePackage(t, up, "pkg", "1.0", content)
+
+	dst, _ := build(t, opamrepo.Sources{Base: up}, "https://mirror.internal")
+	data, err := os.ReadFile(filepath.Join(dst, "packages", "pkg", "pkg.1.0", "opam"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := opamfile.Parse(data)
+
+	if f.URL.Src != "https://mirror.internal/download/pkg/1.0/pkg-1.0.tar.gz" {
+		t.Errorf("url not rewritten: %q", f.URL.Src)
+	}
+	if len(f.Extra) != 2 {
+		t.Fatalf("got %d extra-sources, want 2", len(f.Extra))
+	}
+	// The http extra-source is rewritten, and its archive name is its label.
+	if f.Extra[0].Src != "https://mirror.internal/download/pkg/1.0/fix.patch" {
+		t.Errorf("http extra-source not rewritten: %q", f.Extra[0].Src)
+	}
+	// The git+https extra-source cannot be served as a file, so it is left alone.
+	if f.Extra[1].Src != "git+https://example.org/thing.git" {
+		t.Errorf("git extra-source should be untouched: %q", f.Extra[1].Src)
 	}
 }

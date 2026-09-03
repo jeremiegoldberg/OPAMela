@@ -1,26 +1,31 @@
-// Package opamfile parses and rewrites the url section of an opam package
-// description.
+// Package opamfile parses and rewrites the downloadable sources of an opam
+// package description.
 //
 // It deliberately implements only as much of the opam file format as a mirror
-// needs: locating the top-level "url" section, reading its "src" and
-// "checksum" fields, and replacing the value of "src" without disturbing a
-// single other byte of the file.
+// needs: locating the top-level "url" section and every "extra-source" section,
+// reading their "src" and "checksum" fields, and replacing the value of each
+// "src" without disturbing a single other byte of the file.
 //
 // Everything else in the file is opaque, and that is on purpose. A mirror that
 // re-serialises opam files it does not fully understand will eventually corrupt
-// one; a mirror that splices a single string literal cannot.
+// one; a mirror that splices a string literal in place cannot.
+//
+// Parse never fails: a file it cannot make sense of simply yields no sources,
+// and a mirror leaves such a file untouched rather than crashing on it. One
+// malformed package upstream must not take down a rebuild of twenty thousand.
 package opamfile
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+
+	"bytes"
 )
 
-// ErrNoURL reports that a file carries no usable url.src. This is a normal
-// condition, not a failure: conf-* packages and virtual packages have no
-// source archive at all.
+// ErrNoURL reports that a file carries no usable url.src. conf-* packages and
+// virtual packages have no source archive at all, which is normal.
 var ErrNoURL = errors.New("opamfile: no url.src")
 
 // Checksum is one integrity digest declared by a package.
@@ -31,25 +36,60 @@ type Checksum struct {
 
 func (c Checksum) String() string { return c.Kind + "=" + c.Hex }
 
-// URL is the content of a package's url section.
-type URL struct {
+// Source is one downloadable archive a package refers to: its url section, or
+// one of its extra-source sections. opam fetches extra-sources (patches and the
+// like) separately at build time, so a mirror that ignores them leaves a hole
+// through which builds still reach the public internet.
+type Source struct {
+	Name      string // "" for the url section; the label for an extra-source
 	Src       string
 	Checksums []Checksum
 
-	// Byte range of the src string literal, quotes included, within the
-	// file it was parsed from. RewriteSrc splices exactly this range.
-	srcStart, srcEnd int
+	// Byte range of the src string literal, quotes included, in the file it
+	// was parsed from.
+	start, end int
 }
 
-// Parse extracts the url section of an opam file. It returns ErrNoURL if the
-// file declares no source archive.
-func Parse(data []byte) (*URL, error) {
-	bodyStart, bodyEnd, ok := findSection(data, "url")
-	if !ok {
-		return nil, ErrNoURL
-	}
+// IsExtra reports whether this is an extra-source rather than the url section.
+func (s Source) IsExtra() bool { return s.Name != "" }
 
-	u := &URL{}
+// File is the set of sources declared by an opam file.
+type File struct {
+	URL   *Source  // the package's own source archive; nil for conf/virtual packages
+	Extra []Source // extra-source sections, in file order
+}
+
+// Sources returns the url section (if any) followed by every extra-source.
+func (f *File) Sources() []Source {
+	out := make([]Source, 0, 1+len(f.Extra))
+	if f.URL != nil {
+		out = append(out, *f.URL)
+	}
+	return append(out, f.Extra...)
+}
+
+// Parse extracts every source of an opam file. It never returns an error; a
+// file with no url section yields f.URL == nil.
+func Parse(data []byte) (*File, error) {
+	f := &File{}
+	walkSections(data, func(name, label string, bodyStart, bodyEnd int) {
+		switch {
+		case name == "url":
+			if src, ok := parseSource(data, bodyStart, bodyEnd, ""); ok && f.URL == nil {
+				f.URL = &src
+			}
+		case name == "extra-source" && label != "":
+			if src, ok := parseSource(data, bodyStart, bodyEnd, label); ok {
+				f.Extra = append(f.Extra, src)
+			}
+		}
+	})
+	return f, nil
+}
+
+// parseSource reads the src and checksum fields inside one section body.
+func parseSource(data []byte, bodyStart, bodyEnd int, label string) (Source, bool) {
+	src := Source{Name: label}
 	s := &scanner{data: data[:bodyEnd], pos: bodyStart}
 	for {
 		s.skipTrivia()
@@ -70,50 +110,95 @@ func Parse(data []byte) (*URL, error) {
 
 		switch name {
 		case "src", "archive":
-			lit, start, end, ok := s.readString()
-			if !ok {
-				continue
+			if lit, start, end, ok := s.readString(); ok {
+				src.Src, src.start, src.end = lit, start, end
 			}
-			u.Src, u.srcStart, u.srcEnd = lit, start, end
 		case "checksum":
-			u.Checksums = append(u.Checksums, s.readChecksums()...)
+			src.Checksums = append(src.Checksums, s.readChecksums()...)
 		default:
 			s.skipValue()
 		}
 	}
-
-	if u.Src == "" {
-		return nil, ErrNoURL
+	if src.Src == "" {
+		return Source{}, false
 	}
-	return u, nil
+	return src, true
 }
 
-// RewriteSrc returns a copy of data whose url.src is newSrc. Every other byte
-// is preserved exactly.
+// RewriteSources returns a copy of data where the src of each source is replaced
+// by newSrc(source). A source for which newSrc returns "" is left untouched.
+// Every other byte of the file is preserved exactly.
 //
-// newSrc is rejected if it contains a quote, a backslash or a newline. A URL
-// carrying a newline is the single most likely way to silently produce an opam
-// repository that parses but resolves to nothing, so it is refused here rather
-// than written out and discovered by a build three weeks later.
+// A replacement is rejected if it contains a quote, a backslash or a control
+// character. Such a value is the single most likely way to silently produce an
+// opam repository that parses but resolves to nothing, so it is refused here
+// rather than written out and discovered by a build three weeks later.
+func RewriteSources(data []byte, f *File, newSrc func(Source) string) ([]byte, error) {
+	type repl struct {
+		start, end int
+		val        string
+	}
+	var repls []repl
+
+	add := func(s Source) error {
+		v := newSrc(s)
+		if v == "" {
+			return nil
+		}
+		if i := strings.IndexAny(v, "\"\\\n\r\t"); i >= 0 {
+			return fmt.Errorf("opamfile: refusing to write src containing %q: %q", v[i], v)
+		}
+		repls = append(repls, repl{s.start, s.end, v})
+		return nil
+	}
+	if f.URL != nil {
+		if err := add(*f.URL); err != nil {
+			return nil, err
+		}
+	}
+	for _, e := range f.Extra {
+		if err := add(e); err != nil {
+			return nil, err
+		}
+	}
+
+	if len(repls) == 0 {
+		return append([]byte(nil), data...), nil
+	}
+	sort.Slice(repls, func(i, j int) bool { return repls[i].start < repls[j].start })
+
+	out := make([]byte, 0, len(data)+64)
+	prev := 0
+	for _, r := range repls {
+		out = append(out, data[prev:r.start]...)
+		out = append(out, '"')
+		out = append(out, r.val...)
+		out = append(out, '"')
+		prev = r.end
+	}
+	return append(out, data[prev:]...), nil
+}
+
+// RewriteSrc rewrites only the url section's src, leaving extra-sources alone.
+// It is a convenience over RewriteSources for callers that touch the main
+// source only.
 func RewriteSrc(data []byte, newSrc string) ([]byte, error) {
-	u, err := Parse(data)
+	f, err := Parse(data)
 	if err != nil {
 		return nil, err
+	}
+	if f.URL == nil {
+		return nil, ErrNoURL
 	}
 	if newSrc == "" {
 		return nil, errors.New("opamfile: empty src")
 	}
-	if i := strings.IndexAny(newSrc, "\"\\\n\r\t"); i >= 0 {
-		return nil, fmt.Errorf("opamfile: refusing to write src containing %q: %q", newSrc[i], newSrc)
-	}
-
-	out := make([]byte, 0, len(data)+len(newSrc))
-	out = append(out, data[:u.srcStart]...)
-	out = append(out, '"')
-	out = append(out, newSrc...)
-	out = append(out, '"')
-	out = append(out, data[u.srcEnd:]...)
-	return out, nil
+	return RewriteSources(data, f, func(s Source) string {
+		if s.IsExtra() {
+			return ""
+		}
+		return newSrc
+	})
 }
 
 // parseChecksum reads the "kind=hex" form opam uses.
@@ -316,18 +401,19 @@ func (s *scanner) skipBalanced(open, close byte) {
 	}
 }
 
-// findSection returns the byte range of the body of the top-level section with
-// the given name, braces excluded.
+// walkSections calls fn for every top-level section, giving its name, its label
+// (the quoted string for a labelled section like extra-source, "" otherwise),
+// and the byte range of its body with the braces excluded.
 //
-// Walking the top level rather than searching for "url {" matters: opam files
-// also carry `extra-source "foo" { src: ... checksum: ... }` sections, which
-// look identical to a regex and are not the package source.
-func findSection(data []byte, name string) (start, end int, ok bool) {
+// Walking the top level rather than searching for "url {" or "extra-source"
+// matters: those tokens also appear inside string literals and descriptions,
+// where a regex would find phantom sections.
+func walkSections(data []byte, fn func(name, label string, bodyStart, bodyEnd int)) {
 	s := &scanner{data: data}
 	for {
 		s.skipTrivia()
 		if s.eof() {
-			return 0, 0, false
+			return
 		}
 
 		ident := s.readIdent()
@@ -337,7 +423,7 @@ func findSection(data []byte, name string) (start, end int, ok bool) {
 		}
 		s.skipTrivia()
 		if s.eof() {
-			return 0, 0, false
+			return
 		}
 
 		switch s.data[s.pos] {
@@ -347,14 +433,14 @@ func findSection(data []byte, name string) (start, end int, ok bool) {
 		case '{': // section
 			open := s.pos
 			s.skipBalanced('{', '}')
-			if ident == name {
-				return open + 1, s.pos - 1, true
-			}
+			fn(ident, "", open+1, s.pos-1)
 		case '"': // labelled section: extra-source "foo" { ... }
-			s.readString()
+			label, _, _, _ := s.readString()
 			s.skipTrivia()
 			if !s.eof() && s.data[s.pos] == '{' {
+				open := s.pos
 				s.skipBalanced('{', '}')
+				fn(ident, label, open+1, s.pos-1)
 			}
 		default:
 			s.pos++

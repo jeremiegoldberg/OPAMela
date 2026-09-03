@@ -140,27 +140,27 @@ func TestEndToEnd(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET package file = %s", resp.Status)
 	}
-	u, err := opamfile.Parse(opamFile)
-	if err != nil {
-		t.Fatalf("parsing served opam file: %v", err)
+	u, _ := opamfile.Parse(opamFile)
+	if u.URL == nil {
+		t.Fatal("served opam file has no url section")
 	}
 
 	// It must point at us, not upstream.
-	if got := u.Src; got[:len(h.mirrorURL)] != h.mirrorURL {
+	if got := u.URL.Src; got[:len(h.mirrorURL)] != h.mirrorURL {
 		t.Fatalf("served package points at %q, not at the mirror", got)
 	}
 
 	// Follow it, exactly as opam would.
-	resp, archive := h.get(t, u.Src)
+	resp, archive := h.get(t, u.URL.Src)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET %s = %s", u.Src, resp.Status)
+		t.Fatalf("GET %s = %s", u.URL.Src, resp.Status)
 	}
 	if string(archive) != string(body) {
 		t.Errorf("archive content = %q, want %q", archive, body)
 	}
 
 	// And a second build gets it from disk.
-	h.get(t, u.Src)
+	h.get(t, u.URL.Src)
 	if n := h.upstreamHits["thing-1.0.tar.gz"]; n != 1 {
 		t.Errorf("upstream was hit %d times, want 1", n)
 	}

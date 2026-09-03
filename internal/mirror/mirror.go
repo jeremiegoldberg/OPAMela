@@ -178,28 +178,36 @@ func buildPackage(pkg opamrepo.Package, dstRoot, base string) (packageKind, erro
 		return 0, err
 	}
 
-	kind := rewrittenPackage
-	out := data
+	f, _ := opamfile.Parse(data) // Parse never returns an error
 
-	u, err := opamfile.Parse(data)
-	switch {
-	case errors.Is(err, opamfile.ErrNoURL):
-		kind = sourcelessPackage
-	case err != nil:
-		return 0, fmt.Errorf("%s: %w", pkg.OpamPath(), err)
-	case !Mirrorable(u.Src):
-		// git+https and the like cannot be served as an archive. Leaving
-		// these alone is the honest outcome: 18 packages out of 22,000 in
-		// opam-repository, and a mirror that pretended otherwise would
-		// hand opam a file where it expects a clone.
-		kind = passthroughPackage
-	default:
-		archive := ArchiveName(u.Src, pkg.Name, pkg.Version)
-		rewritten, err := opamfile.RewriteSrc(data, base+DownloadPath(pkg.Name, pkg.Version, archive))
-		if err != nil {
-			return 0, fmt.Errorf("%s: %w", pkg.OpamPath(), err)
+	// Rewrite the url source and every mirrorable extra-source in one pass, so
+	// that the patches opam fetches at build time also come through the mirror
+	// instead of straight from the public internet.
+	out, err := opamfile.RewriteSources(data, f, func(s opamfile.Source) string {
+		if !Mirrorable(s.Src) {
+			return ""
 		}
-		out = rewritten
+		archive := ArchiveNameFor(s, pkg.Name, pkg.Version)
+		return base + DownloadPath(pkg.Name, pkg.Version, archive)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", pkg.OpamPath(), err)
+	}
+
+	// Classify the package by its own source, for the build summary. Its
+	// extra-sources were rewritten above regardless of this.
+	var kind packageKind
+	switch {
+	case f.URL == nil:
+		// conf-* and virtual packages have no source archive.
+		kind = sourcelessPackage
+	case Mirrorable(f.URL.Src):
+		kind = rewrittenPackage
+	default:
+		// git+https and the like cannot be served as an archive. Leaving the
+		// url alone is the honest outcome, and a mirror that pretended
+		// otherwise would hand opam a file where it expects a clone.
+		kind = passthroughPackage
 	}
 
 	// The destination is the versioned package directory. Writing one level
@@ -242,6 +250,19 @@ func ArchiveName(src, pkg, version string) string {
 		return fallback
 	}
 	return name
+}
+
+// ArchiveNameFor is the file name a rewritten source advertises. For the url
+// section it comes from the upstream URL; for an extra-source it is the
+// section's label, which opam guarantees to be a filename unique within the
+// package. The rare case where an extra-source label collides with the url
+// archive name resolves in favour of the url, since the server tries the url
+// first; such a collision has not been observed in opam-repository.
+func ArchiveNameFor(s opamfile.Source, pkg, version string) string {
+	if s.IsExtra() && safeArchiveName(s.Name) {
+		return s.Name
+	}
+	return ArchiveName(s.Src, pkg, version)
 }
 
 func safeArchiveName(s string) bool {
