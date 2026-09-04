@@ -1,0 +1,3 @@
+(library
+ (name opamela)
+ (libraries unix str threads.posix))

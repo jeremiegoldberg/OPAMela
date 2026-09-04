@@ -1,0 +1,28 @@
+opam-version: "2.0"
+synopsis: "A mirror of opam-repository that rewrites the index instead of proxying it"
+description: """
+opamela clones opam-repository, rewrites every url.src (and every extra-source)
+to point at itself, and serves the result as an ordinary opam repository. A
+whole CI fleet then fetches opam packages from one host on its own network
+instead of re-downloading them from the public internet on every build.
+
+This is the OCaml implementation. It depends only on the standard library, unix,
+str and threads, and delegates to git, curl, tar and the sha*sum tools at run
+time, the way the Go implementation delegates to git.
+"""
+maintainer: "Jérémie Goldberg"
+authors: "Jérémie Goldberg"
+license: "Apache-2.0"
+homepage: "https://github.com/jeremiegoldberg/OPAMela"
+bug-reports: "https://github.com/jeremiegoldberg/OPAMela/issues"
+depends: [
+  "ocaml" {>= "4.08"}
+  "dune" {>= "3.0"}
+]
+build: [
+  ["dune" "build" "-p" name "-j" jobs]
+  ["dune" "runtest" "-p" name "-j" jobs] {with-test}
+]
+depexts: [
+  ["git" "curl" "tar" "coreutils"]
+]

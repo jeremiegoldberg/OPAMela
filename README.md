@@ -293,6 +293,13 @@ The opam file scanner is hand written, so it is also fuzzed:
 go test ./internal/opamfile/ -run XXX -fuzz FuzzParse -fuzztime 60s
 ```
 
+## An OCaml implementation
+
+opamela mirrors OCaml packages, so it is also implemented in the ecosystem's own
+language, under [`ocaml/`](ocaml/). It is kept behaviourally identical to this Go
+version and checked against the same real opam-repository checkout, where the two
+produce the same counts. See [ocaml/README.md](ocaml/README.md).
+
 ## Licence
 
 Apache License 2.0. See [LICENSE](LICENSE).
